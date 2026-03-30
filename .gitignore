@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+*.xcuserstate
+xcuserdata/
+
+# Build artifacts
+DerivedData/
+.build/
+Products/
+*.app
+*.xctest
+
+# Swift Package Manager
+.swiftpm/
+
+# Local environment and secrets
+.env
+.env.*
+*.xcconfig
+GoogleService-Info.plist
+
+# Misc
+*.log
