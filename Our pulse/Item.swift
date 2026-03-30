@@ -1,10 +1,3 @@
-//
-//  Item.swift
-//  Our pulse
-//
-//  Created by Иван Солончак on 26.03.2026.
-//
-
 import Foundation
 import SwiftData
 

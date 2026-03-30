@@ -1,10 +1,3 @@
-//
-//  Our_pulseUITestsLaunchTests.swift
-//  Our pulseUITests
-//
-//  Created by Иван Солончак on 26.03.2026.
-//
-
 import XCTest
 
 final class Our_pulseUITestsLaunchTests: XCTestCase {
