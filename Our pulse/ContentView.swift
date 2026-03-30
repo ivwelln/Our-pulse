@@ -40,7 +40,7 @@ struct ContentView: View {
                     AnimatedTabItemLabel(
                         title: "Настройки",
                         systemImage: "gear",
-                        selectedSystemImage: "gearshape.fill",
+                        selectedSystemImage: "gear.fill",
                         isSelected: selectedTab == .settings,
                         effect: .rotate,
                         trigger: settingsTrigger
@@ -118,7 +118,7 @@ struct MainDashboardView: View {
                     HeaderBlock()
 
                     StatusHero(
-                        snapshot: monitor.lastSnapshot,
+                        snapshot: monitor.displaySnapshot,
                         isChecking: monitor.isChecking
                     )
 
@@ -278,7 +278,7 @@ private struct HeaderBlock: View {
         }
         .padding(.top, 50)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: monitor.isVPNActive)
-        .onChange(of: monitor.lastSnapshot?.checkedAt, initial: false) { _, newValue in
+        .onChange(of: monitor.displaySnapshot?.checkedAt, initial: false) { _, newValue in
             guard newValue != nil, monitor.isVPNActive else { return }
             vpnBounceTrigger += 1
         }
@@ -672,7 +672,7 @@ private struct EndpointSection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Контрольные адреса")
                         .font(.system(.headline, design: .rounded, weight: .semibold))
-                    Text("Российские адреса сравниваются с зарубежными, чтобы понять текущее состояние сети.")
+                    Text("Российские сервера сравниваются с зарубежными, чтобы понять текущее состояние сети.")
                         .font(.system(.footnote, design: .rounded))
                         .foregroundStyle(.secondary)
                 }

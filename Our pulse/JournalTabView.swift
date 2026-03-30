@@ -77,7 +77,7 @@ private struct JournalSnapshotRow: View {
                 )
 
                 JournalMetaBadge(
-                    title: snapshot.isVPNActive ? "VPN включен" : "VPN выкл",
+                    title: snapshot.isVPNActive ? "VPN включен" : "VPN выключен",
                     systemImage: snapshot.isVPNActive ? "lock.shield.fill" : "lock.open",
                     tint: snapshot.isVPNActive ? .orange : .green
                 )

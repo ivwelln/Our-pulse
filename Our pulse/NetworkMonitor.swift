@@ -22,11 +22,13 @@ final class NetworkMonitor {
 
     enum Constants {
         static let backgroundTaskIdentifier = "Ruscan.Our-pulse.refresh"
-        static let probeTimeout: TimeInterval = 8
+        static let probeTimeout: TimeInterval = 4
+        static let overallProbeDeadline: Duration = .seconds(5)
         static let maxHistoryCount = 20
     }
 
     var endpoints: [MonitoredEndpoint]
+    var displaySnapshot: NetworkSnapshot?
     var lastSnapshot: NetworkSnapshot?
     var history: [NetworkSnapshot]
     var notificationStatus: UNAuthorizationStatus = .notDetermined
@@ -53,14 +55,18 @@ final class NetworkMonitor {
         self.defaults = defaults
         pathMonitor = isPreview ? nil : NWPathMonitor()
         endpoints = Self.defaultEndpoints
+        displaySnapshot = nil
         lastSnapshot = Self.load(NetworkSnapshot.self, key: StorageKey.snapshot, from: defaults)
         history = Self.load([NetworkSnapshot].self, key: StorageKey.history, from: defaults) ?? []
         notificationPreference = Self.load(NotificationPreference.self, key: StorageKey.notificationPreference, from: defaults) ?? .whitelistChanges
         checkInterval = Self.load(CheckInterval.self, key: StorageKey.checkInterval, from: defaults) ?? .thirtyMinutes
 
+        displaySnapshot = lastSnapshot
+
         if isPreview {
             endpoints = Self.defaultEndpoints
             lastSnapshot = NetworkSnapshot.preview
+            displaySnapshot = NetworkSnapshot.preview
             history = [NetworkSnapshot.preview]
             notificationStatus = .authorized
             backgroundRefreshStatus = .available
@@ -206,7 +212,52 @@ final class NetworkMonitor {
 
         refreshEnvironmentStatuses()
 
-        let results = await stagedProbe(endpoints: activeEndpoints)
+        if connectionKind == .offline {
+            let snapshot = NetworkSnapshot(
+                checkedAt: .now,
+                state: .offline,
+                results: [],
+                summary: "Сетевой путь недоступен: запросы не запускались.",
+                headline: "Нет доступа к сети",
+                details: offlineDetails(isVPNActive: isVPNActive),
+                connectionKind: connectionKind,
+                isVPNActive: isVPNActive
+            )
+
+            let previousState = lastSnapshot?.state
+            apply(snapshot)
+
+            if let previousState, previousState != snapshot.state {
+                await notifyAboutStateChange(from: previousState, to: snapshot.state)
+            }
+
+            triggerActiveAppHapticIfNeeded()
+            scheduleBackgroundRefresh()
+            debugLog("runCheck finished early: path offline", origin: origin)
+            return origin != .background || !Task.isCancelled
+        }
+
+        let probeTask = Task { [self] in
+            await stagedProbe(endpoints: activeEndpoints)
+        }
+        let completedBeforeDeadline = await didProbeFinishBeforeDeadline(probeTask)
+
+        if !completedBeforeDeadline {
+            let snapshot = NetworkSnapshot(
+                checkedAt: .now,
+                state: .offline,
+                results: [],
+                summary: "Ни один сервер не ответил в течение \(Self.deadlineDescription).",
+                headline: "Нет доступа к сети",
+                details: timeoutOfflineDetails(isVPNActive: isVPNActive),
+                connectionKind: connectionKind,
+                isVPNActive: isVPNActive
+            )
+            displaySnapshot = snapshot
+            debugLog("runCheck provisional timeout: waiting for late responses", origin: origin)
+        }
+
+        let results = await probeTask.value
         let analysis = Self.analyze(
             results: results,
             allEndpoints: activeEndpoints,
@@ -254,6 +305,7 @@ final class NetworkMonitor {
     }
 
     private func apply(_ snapshot: NetworkSnapshot) {
+        displaySnapshot = snapshot
         lastSnapshot = snapshot
         history.insert(snapshot, at: 0)
         history = Array(history.prefix(Constants.maxHistoryCount))
@@ -306,9 +358,10 @@ final class NetworkMonitor {
         }
 
         debugLog("state change notification: \\(oldState.rawValue) -> \\(newState.rawValue)", origin: .background)
+        let notificationVariant = notificationVariant(for: oldState, to: newState)
         let content = UNMutableNotificationContent()
-        content.title = newState.notificationTitle
-        content.body = newState.notificationBody
+        content.title = notificationVariant.title
+        content.body = notificationVariant.body
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -351,16 +404,37 @@ final class NetworkMonitor {
         }
 
         let secondaryRestricted = restricted.filter { $0.id != primaryRestricted.id }
-        let secondaryRestrictedResults = await probe(endpoints: secondaryRestricted)
+        async let secondaryRestrictedResultsTask = probe(endpoints: secondaryRestricted)
+        async let allowedResultsTask = probe(endpoints: allowed)
+
+        let secondaryRestrictedResults = await secondaryRestrictedResultsTask
         collected.append(contentsOf: secondaryRestrictedResults)
 
         if secondaryRestrictedResults.contains(where: \.isReachable) {
             return collected.sorted { $0.urlString < $1.urlString }
         }
 
-        let allowedResults = await probe(endpoints: allowed)
+        let allowedResults = await allowedResultsTask
         collected.append(contentsOf: allowedResults)
         return collected.sorted { $0.urlString < $1.urlString }
+    }
+
+    private func didProbeFinishBeforeDeadline(_ probeTask: Task<[EndpointProbeResult], Never>) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                _ = await probeTask.value
+                return true
+            }
+
+            group.addTask {
+                try? await Task.sleep(for: Constants.overallProbeDeadline)
+                return false
+            }
+
+            let firstResult = await group.next() ?? false
+            group.cancelAll()
+            return firstResult
+        }
     }
 
     private static func probe(endpoint: MonitoredEndpoint) async -> EndpointProbeResult {
@@ -610,20 +684,6 @@ final class NetworkMonitor {
             )
         }
 
-        if !anyReachable && isVPNActive {
-            return NetworkAnalysis(
-                state: .vpnVerificationBlocked,
-                headline: "VPN мешает подтвердить состояние сети",
-                summary: makeSummary(from: results),
-                details: [
-                    vpnWarning,
-                    "При включенном VPN не отвечает ни один контрольный адрес.",
-                    "В таком сценарии нельзя надежно отличить отсутствие интернета от блокировки VPN белыми списками.",
-                    "Для точной проверки временно отключите VPN и повторите замер."
-                ]
-            )
-        }
-
         if !anyReachable && connectionKind == .wifi {
             return NetworkAnalysis(
                 state: .offline,
@@ -785,6 +845,21 @@ final class NetworkMonitor {
         return [primaryRestricted] + secondaryRestricted + allowed
     }
 
+    nonisolated static func shouldNotifyForTesting(
+        preference: NotificationPreference,
+        oldState: NetworkState,
+        newState: NetworkState
+    ) -> Bool {
+        switch preference {
+        case .none:
+            false
+        case .whitelistChanges:
+            newState == .whitelistOn || (oldState == .whitelistOn && newState == .whitelistOff)
+        case .connectionLoss:
+            (oldState != .offline && newState == .offline) || (oldState == .offline && newState != .offline)
+        }
+    }
+
     func updateNotificationPreference(_ preference: NotificationPreference) {
         notificationPreference = preference
         persist()
@@ -818,14 +893,68 @@ final class NetworkMonitor {
     }
 
     private func shouldNotify(from oldState: NetworkState, to newState: NetworkState) -> Bool {
+        Self.shouldNotifyForTesting(
+            preference: notificationPreference,
+            oldState: oldState,
+            newState: newState
+        )
+    }
+
+    private func notificationVariant(for oldState: NetworkState, to newState: NetworkState) -> NotificationVariant {
         switch notificationPreference {
-        case .none:
-            return false
-        case .whitelistChanges:
-            return newState == .whitelistOn || newState == .whitelistOff
+        case .none, .whitelistChanges:
+            return NotificationVariant(title: newState.notificationTitle, body: newState.notificationBody)
         case .connectionLoss:
-            return oldState != .offline && newState == .offline
+            if newState == .offline {
+                return NotificationVariant(
+                    title: "Соединение пропало",
+                    body: "Приложение перестало видеть доступ к сети."
+                )
+            }
+
+            if oldState == .offline {
+                return NotificationVariant(
+                    title: "Соединение восстановлено",
+                    body: "Сеть снова доступна. Текущий статус: \\(newState.title)."
+                )
+            }
+
+            return NotificationVariant(title: newState.notificationTitle, body: newState.notificationBody)
         }
+    }
+
+    private func offlineDetails(isVPNActive: Bool) -> [String] {
+        if isVPNActive {
+            return [
+                "На устройстве обнаружен активный VPN.",
+                "Системный монитор сети уже сообщает об отсутствии доступного соединения.",
+                "Ни один запрос не запускался, потому что сеть недоступна на системном уровне."
+            ]
+        }
+
+        return [
+            "Системный монитор сети сообщает, что доступного соединения сейчас нет.",
+            "Поэтому приложение сразу показывает офлайн-статус без ожидания таймаутов HTTP-запросов."
+        ]
+    }
+
+    private func timeoutOfflineDetails(isVPNActive: Bool) -> [String] {
+        if isVPNActive {
+            return [
+                "На устройстве обнаружен активный VPN.",
+                "Ни один контрольный сервер не ответил в течение \(Self.deadlineDescription).",
+                "Для скорости приложение считает такой сценарий отсутствием доступа к сети."
+            ]
+        }
+
+        return [
+            "Ни один контрольный сервер не ответил в течение \(Self.deadlineDescription).",
+            "Для скорости приложение завершило проверку и показало офлайн-статус."
+        ]
+    }
+
+    private static var deadlineDescription: String {
+        "5 секунд"
     }
 }
 
@@ -926,7 +1055,7 @@ enum NotificationPreference: String, Codable, CaseIterable, Identifiable {
         case .whitelistChanges:
             "Только о включении и выключении белых списков."
         case .connectionLoss:
-            "Только когда пропадает доступ к сети."
+            "Когда соединение пропадает и когда оно снова появляется."
         }
     }
 
@@ -1058,10 +1187,34 @@ extension NetworkConnectionKind {
 enum NetworkState: String, Codable {
     case whitelistOn
     case whitelistOff
-    case vpnVerificationBlocked
     case offline
     case degraded
     case unknown
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+
+        switch rawValue {
+        case "whitelistOn":
+            self = .whitelistOn
+        case "whitelistOff":
+            self = .whitelistOff
+        case "offline", "vpnVerificationBlocked":
+            self = .offline
+        case "degraded":
+            self = .degraded
+        case "unknown":
+            self = .unknown
+        default:
+            self = .unknown
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 
     var title: String {
         switch self {
@@ -1069,8 +1222,6 @@ enum NetworkState: String, Codable {
             "Белые списки включены"
         case .whitelistOff:
             "Белые списки выключены"
-        case .vpnVerificationBlocked:
-            "VPN мешает проверке"
         case .offline:
             "Нет доступа к сети"
         case .degraded:
@@ -1086,8 +1237,6 @@ enum NetworkState: String, Codable {
             "Адреса из белого списка отвечают, остальные нет."
         case .whitelistOff:
             "Связь со всеми серверами в норме."
-        case .vpnVerificationBlocked:
-            "При активном VPN и полном отсутствии ответов нельзя отличить офлайн от блокировки VPN белыми списками."
         case .offline:
             "Ни один из адресов сейчас не отвечает."
         case .degraded:
@@ -1103,8 +1252,6 @@ enum NetworkState: String, Codable {
             "lock.shield.fill"
         case .whitelistOff:
             "globe.badge.chevron.backward"
-        case .vpnVerificationBlocked:
-            "lock.trianglebadge.exclamationmark.fill"
         case .offline:
             "wifi.slash"
         case .degraded:
@@ -1120,8 +1267,6 @@ enum NetworkState: String, Codable {
             .orange
         case .whitelistOff:
             .green
-        case .vpnVerificationBlocked:
-            .indigo
         case .offline:
             .red
         case .degraded:
@@ -1144,20 +1289,20 @@ enum NetworkState: String, Codable {
         case .whitelistOn:
             Self.whitelistOnVariants.randomElement() ?? NotificationVariant(
                 title: "🔒 Белые списки включились",
-                body: "🌍 Зарубежные адреса перестали отвечать, российские доступны."
+                body: "🌍 Зарубежные сервера перестали отвечать, российские доступны."
             )
         case .whitelistOff:
             Self.whitelistOffVariants.randomElement() ?? NotificationVariant(
                 title: "🌍 Белые списки отключились",
-                body: "✨ Зарубежные адреса снова доступны."
+                body: "✨ Зарубежные сервера снова доступны."
             )
-        case .vpnVerificationBlocked, .offline, .degraded, .unknown:
+        case .offline, .degraded, .unknown:
             NotificationVariant(title: title, body: description)
         }
     }
 
     private static let whitelistOnVariants: [NotificationVariant] = [
-        NotificationVariant(title: "🔒 Белые списки включились", body: "🌍 Зарубежные адреса перестали отвечать, российские доступны."),
+        NotificationVariant(title: "🔒 Белые списки включились", body: "🌍 Зарубежные сервера перестали отвечать, российские доступны."),
         NotificationVariant(title: "⚠️ Похоже, рубильник щелкнул", body: "🚧 Внешние сервисы недоступны, белые списки в деле."),
         NotificationVariant(title: "🏠 Интернет стал локальнее", body: "📡 Признаки указывают на активацию белых списков."),
         NotificationVariant(title: "🚪 Границу закрыли", body: "🪪 Похоже, интернет теперь по пропускам"),

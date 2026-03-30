@@ -44,7 +44,7 @@ struct Our_pulseTests {
         #expect(state == .offline)
     }
 
-    @Test func offlineWithVPNBecomesVPNIndeterminateState() async throws {
+    @Test func offlineWithVPNStillBecomesOfflineState() async throws {
         let state = NetworkMonitor.analyzeStateForTesting(
             results: [
                 unreachableResult(name: "Allowed", url: "https://allowed.example", role: .allowed),
@@ -55,7 +55,7 @@ struct Our_pulseTests {
             connectionKind: .cellular
         )
 
-        #expect(state == .vpnVerificationBlocked)
+        #expect(state == .offline)
     }
 
     @Test func whitelistOnRequiresRestrictedFailuresButAllowedReachability() async throws {
@@ -70,6 +70,26 @@ struct Our_pulseTests {
         )
 
         #expect(state == .whitelistOn)
+    }
+
+    @Test func whitelistOffNotificationDoesNotFireAfterOfflineState() async throws {
+        let shouldNotify = NetworkMonitor.shouldNotifyForTesting(
+            preference: .whitelistChanges,
+            oldState: .offline,
+            newState: .whitelistOff
+        )
+
+        #expect(shouldNotify == false)
+    }
+
+    @Test func connectionLossPreferenceAlsoNotifiesWhenConnectionReturns() async throws {
+        let shouldNotify = NetworkMonitor.shouldNotifyForTesting(
+            preference: .connectionLoss,
+            oldState: .offline,
+            newState: .whitelistOff
+        )
+
+        #expect(shouldNotify == true)
     }
 
     @Test func unexpectedRedirectHostIsNotReachable() async throws {
