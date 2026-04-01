@@ -8,7 +8,10 @@
 
 На основе этих проверок приложение показывает текущее состояние сети, ведет короткий журнал и может отправлять локальные уведомления при смене состояния.
 
-<img width="603" height="1311" alt="IMG_1914" src="https://github.com/user-attachments/assets/c3dd9b9c-31c4-47cd-bb83-5e03cb0e01f9" />
+<img width="201" height="437" alt="IMG_1913" src="https://github.com/user-attachments/assets/c8c09910-f1e7-449c-b626-86eaa0851661" />
+<img width="201" height="437" alt="IMG_1915" src="https://github.com/user-attachments/assets/457d5f3d-a75f-437f-88d8-6d4e86c40f97" />
+<img width="201" height="437" alt="IMG_1912" src="https://github.com/user-attachments/assets/98629a17-74f2-4da4-b107-3465aaa8be21" />
+<img width="201" height="437" alt="IMG_1914" src="https://github.com/user-attachments/assets/e47c984a-e9f9-4d85-b5fe-4ce8e91dfbe2" />
 
 
 ## Стек
